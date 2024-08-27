@@ -1,0 +1,11 @@
+@import 'tailwindcss/base';
+@import 'tailwindcss/components';
+@import 'tailwindcss/utilities';
+
+body {
+  @apply bg-gradient-to-b from-blue-200 to-blue-400 min-h-screen;
+}
+
+.cloud-card {
+  @apply bg-white bg-opacity-80 rounded-lg shadow-lg p-6 mb-4;
+}
