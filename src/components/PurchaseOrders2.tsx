@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
-import Layout from './Layout';
-import { Download, Trash2, Edit2, Plus, Filter } from 'lucide-react';
-import jsPDF from 'jspdf';
-import 'jspdf-autotable';
+// src/components/PurchaseOrders.tsx
+
+import React, { useState, useEffect, useRef } from "react";
+import Layout from "./Layout";
+import { Download, Trash2, Edit2, Plus, Filter } from "lucide-react";
+import jsPDF from "jspdf";
+import "jspdf-autotable";
 import {
   collection,
   addDoc,
@@ -15,17 +17,23 @@ import {
   onSnapshot,
   getDocs,
   Timestamp,
-} from 'firebase/firestore';
-import { db, auth } from '../firebase';
-import { onAuthStateChanged } from 'firebase/auth';
-import dayjs from 'dayjs';
-import utc from 'dayjs/plugin/utc';
-import timezone from 'dayjs/plugin/timezone';
-import isBetween from 'dayjs/plugin/isBetween'; // isBetween eklentisini import ettik
+} from "firebase/firestore";
+import { db, auth } from "../firebase";
+import { onAuthStateChanged } from "firebase/auth";
+import dayjs from "dayjs";
 
-dayjs.extend(utc);
-dayjs.extend(timezone);
-dayjs.extend(isBetween); // isBetween eklentisini dayjs'e ekledik
+declare module "jspdf" {
+  interface jsPDF {
+    autoTable: (options: AutoTableOptions) => jsPDF;
+  }
+}
+
+interface AutoTableOptions {
+  head: string[][];
+  body: (string | number)[][];
+  startY?: number;
+  [key: string]: any;
+}
 
 interface PurchaseOrdersProps {
   logo: string;
@@ -34,13 +42,11 @@ interface PurchaseOrdersProps {
 
 interface PurchaseOrder {
   id: string;
-  date: Timestamp;
-  formattedDate: string;
+  date: string;
   invoiceNumber: string;
   product: string;
   supplier: string;
   quantity: number;
-  quantityUoM: number;
   costOfUnit: number;
   costOfUnitOfMeasure: number;
   purchUnitQty: number;
@@ -53,13 +59,12 @@ interface RawGood {
   id: string;
   name: string;
   qtyOnHand: number;
-  costOfUnit: number;
-  purchUnitQty: number;
-  unitOfMeasure: string;
-  purchaseUnit: string;
   averageCostOfUnitOfMeasure: number;
   lastCostOfUnitOfMeasure: number;
-  lastCostOfUnit?: number;
+  unitOfMeasure: string;
+  purchaseUnit: string;
+  costOfUnit: number;
+  purchUnitQty: number;
   date?: Timestamp;
 }
 
@@ -75,20 +80,28 @@ interface TempProduct {
 }
 
 const initialPurchaseOrderHeader = {
-  date: dayjs().format('YYYY-MM-DDTHH:mm'),
-  supplier: '',
-  invoiceNumber: '',
+  date: new Date().toISOString().split("T")[0],
+  supplier: "",
+  invoiceNumber: "",
 };
 
-const initialProduct = {
-  product: '',
+const initialProduct: TempProduct = {
+  product: "",
   quantity: 0,
   costOfUnit: 0,
   purchUnitQty: 0,
-  unitOfMeasure: '',
-  purchaseUnit: '',
+  unitOfMeasure: "",
+  purchaseUnit: "",
   totalCost: 0,
   costOfUnitOfMeasure: 0,
+};
+
+const unitMultipliers: { [key: string]: number } = {
+  Grams: 1,
+  Kilograms: 1000,
+  Milliliters: 1,
+  Litre: 1000,
+  Count: 1,
 };
 
 const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
@@ -96,148 +109,71 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
   restaurantName,
 }) => {
   const [purchaseOrderList, setPurchaseOrderList] = useState<PurchaseOrder[]>([]);
-  const [purchaseOrderHeader, setPurchaseOrderHeader] = useState(
-    initialPurchaseOrderHeader
-  );
+  const [purchaseOrderHeader, setPurchaseOrderHeader] = useState(initialPurchaseOrderHeader);
   const [tempProducts, setTempProducts] = useState<TempProduct[]>([]);
   const [showProductForm, setShowProductForm] = useState(false);
-  const [currentProduct, setCurrentProduct] =
-    useState<TempProduct>(initialProduct);
-  const [editingProductIndex, setEditingProductIndex] = useState<number | null>(
-    null
-  );
+  const [currentProduct, setCurrentProduct] = useState<TempProduct>(initialProduct);
+  const [editingPurchaseOrderId, setEditingPurchaseOrderId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [userLoggedIn, setUserLoggedIn] = useState<boolean | null>(null);
   const [inputErrors, setInputErrors] = useState<{ [key: string]: string }>({});
   const [rawGoodsList, setRawGoodsList] = useState<RawGood[]>([]);
   const [supplierList, setSupplierList] = useState<string[]>([]);
-  const [productError, setProductError] = useState<string>('');
-
-  // Filtreleme ve sıralama için state'ler
+  const [productError, setProductError] = useState<string>("");
   const [filterPopupVisible, setFilterPopupVisible] = useState<{ [key: string]: boolean }>({});
   const [filters, setFilters] = useState<{ [key: string]: any }>({});
   const [sortConfig, setSortConfig] = useState<{
     key: string;
-    direction: 'ascending' | 'descending';
+    direction: "ascending" | "descending";
   } | null>(null);
-
-  // Tarih aralığı filtreleri
-  const [dateRange, setDateRange] = useState<{ startDate: string; endDate: string }>({
-    startDate: '',
-    endDate: '',
+  const [dateRange, setDateRange] = useState<{ start: string; end: string }>({
+    start: "",
+    end: "",
   });
+  const filterTimers = useRef<{ [key: string]: NodeJS.Timeout }>({});
 
+  // Convert quantities to base units using unit multipliers
   const convertToBaseUnit = (quantity: number, unitOfMeasure: string): number => {
-    if (unitOfMeasure === 'Kilograms' || unitOfMeasure === 'Litres') {
-      return quantity * 1000;
-    }
-    return quantity;
+    const multiplier = unitMultipliers[unitOfMeasure] || 1;
+    return quantity * multiplier;
   };
 
-  const revertRawGoodsInventory = async (purchaseOrder: PurchaseOrder) => {
-    try {
-      const rawGood = rawGoodsList.find((rg) => rg.name === purchaseOrder.product);
-      if (!rawGood) return;
-
-      const adjustedPurchUnitQty = convertToBaseUnit(
-        purchaseOrder.purchUnitQty,
-        purchaseOrder.unitOfMeasure
-      );
-
-      const quantityToRevert = purchaseOrder.quantity * adjustedPurchUnitQty;
-
-      const rawGoodRef = doc(db, 'rawGoods', rawGood.id);
-
-      const purchaseOrdersRef = collection(db, 'purchaseOrders');
-      const q = query(
-        purchaseOrdersRef,
-        where('userId', '==', auth.currentUser!.uid),
-        where('product', '==', purchaseOrder.product),
-        orderBy('date', 'desc')
-      );
-      const snapshot = await getDocs(q);
-
-      let totalQuantity = 0;
-      let totalValue = 0;
-      let lastPurchaseOrder: PurchaseOrder | null = null;
-
-      if (!snapshot.empty) {
-        const purchaseOrders = snapshot.docs
-          .map((doc) => {
-            const data = doc.data();
-            if (doc.id === purchaseOrder.id) return null;
-
-            return {
-              id: doc.id,
-              date: data.date,
-              quantity: Number(data.quantity),
-              costOfUnit: Number(data.costOfUnit),
-              costOfUnitOfMeasure: Number(data.costOfUnitOfMeasure),
-              purchUnitQty: Number(data.purchUnitQty),
-              unitOfMeasure: data.unitOfMeasure,
-            } as PurchaseOrder;
-          })
-          .filter((po) => po !== null) as PurchaseOrder[];
-
-        if (purchaseOrders.length > 0) {
-          lastPurchaseOrder = purchaseOrders[0];
-
-          for (const po of purchaseOrders) {
-            const adjustedPurchUnitQty = convertToBaseUnit(
-              po.purchUnitQty,
-              po.unitOfMeasure
-            );
-            const poQuantity = po.quantity * adjustedPurchUnitQty;
-            const poValue = poQuantity * po.costOfUnitOfMeasure;
-
-            totalQuantity += poQuantity;
-            totalValue += poValue;
-          }
-        }
-      }
-
-      const newQtyOnHand = rawGood.qtyOnHand - quantityToRevert;
-      const newAverageCost = totalQuantity > 0 ? totalValue / totalQuantity : 0;
-
-      const updatedData: Partial<RawGood> = {
-        qtyOnHand: newQtyOnHand,
-        averageCostOfUnitOfMeasure: newAverageCost,
-        date: Timestamp.now(),
-      };
-
-      if (lastPurchaseOrder) {
-        updatedData.lastCostOfUnit = lastPurchaseOrder.costOfUnit;
-        updatedData.lastCostOfUnitOfMeasure =
-          lastPurchaseOrder.costOfUnitOfMeasure;
-      } else {
-        updatedData.lastCostOfUnit = 0;
-        updatedData.lastCostOfUnitOfMeasure = 0;
-      }
-
-      await updateDoc(rawGoodRef, updatedData);
-
-      setRawGoodsList((prevList) =>
-        prevList.map((rg) =>
-          rg.id === rawGood.id
-            ? {
-                ...rg,
-                qtyOnHand: newQtyOnHand,
-                averageCostOfUnitOfMeasure: newAverageCost,
-                lastCostOfUnit: updatedData.lastCostOfUnit,
-                lastCostOfUnitOfMeasure: updatedData.lastCostOfUnitOfMeasure,
-                date: Timestamp.now(),
-              }
-            : rg
-        )
-      );
-    } catch (error) {
-      console.error('Error reverting raw goods inventory:', error);
-      setError('Failed to revert raw goods inventory. Please try again.');
-      throw error;
-    }
+  // Convert base units to display units using unit multipliers
+  const convertFromBaseUnit = (
+    quantity: number,
+    unitOfMeasure: string
+  ): number => {
+    const multiplier = unitMultipliers[unitOfMeasure] || 1;
+    return quantity / multiplier;
   };
 
+  // Handle changes in the purchase order header form
+  const handleHeaderChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
+  ) => {
+    const { name, value } = e.target;
+    setPurchaseOrderHeader((prev) => ({
+      ...prev,
+      [name]: value,
+    }));
+  };
+
+  // Check if the form has the necessary information to add a product
+  const canAddProduct = () => {
+    return (
+      purchaseOrderHeader.date &&
+      purchaseOrderHeader.supplier &&
+      purchaseOrderHeader.invoiceNumber
+    );
+  };
+
+  // Check for duplicate products in the current order (only when adding)
+  const checkDuplicateProduct = (product: string) => {
+    return tempProducts.some((p) => p.product === product);
+  };
+
+  // Monitor authentication state
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
       if (user) {
@@ -245,15 +181,14 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
       } else {
         setUserLoggedIn(false);
         setLoading(false);
-        setError(
-          'No user logged in. Please log in to view purchase orders.'
-        );
+        setError("No user logged in. Please log in to view purchase orders.");
       }
     });
 
     return () => unsubscribeAuth();
   }, []);
 
+  // Fetch data when user is logged in
   useEffect(() => {
     let unsubscribePurchaseOrders: () => void;
 
@@ -261,86 +196,82 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
       if (!auth.currentUser) return;
 
       try {
-        const purchaseOrdersRef = collection(db, 'purchaseOrders');
+        // Fetch Purchase Orders ordered by date descending
+        const purchaseOrdersRef = collection(db, "purchaseOrders");
         const q = query(
           purchaseOrdersRef,
-          where('userId', '==', auth.currentUser.uid),
-          orderBy('date', 'desc'),
-          orderBy('product')
+          where("userId", "==", auth.currentUser.uid),
+          orderBy("date", "desc") // Order by date descending
         );
 
         unsubscribePurchaseOrders = onSnapshot(q, (querySnapshot) => {
           const purchaseOrders = querySnapshot.docs.map((doc) => {
             const data = doc.data();
-            let formattedDate = '';
+            let formattedDate = "";
 
             if (data.date) {
-              formattedDate = dayjs(data.date.toDate()).format(
-                'DD.MM.YYYY HH:mm'
-              );
+              if (data.date instanceof Timestamp) {
+                formattedDate = dayjs(data.date.toDate()).format("MM/DD/YYYY");
+              } else {
+                // If date is stored as string
+                formattedDate = dayjs(data.date).format("MM/DD/YYYY");
+              }
             } else {
-              formattedDate = 'N/A';
+              formattedDate = "N/A";
             }
-
-            const quantity = Number(data.quantity) || 0;
-            const purchUnitQty = Number(data.purchUnitQty) || 0;
-            const quantityUoM = quantity * purchUnitQty;
-            const safeQuantityUoM = isNaN(quantityUoM) ? 0 : quantityUoM;
 
             return {
               id: doc.id,
-              date: data.date,
-              formattedDate: formattedDate,
-              invoiceNumber: data.invoiceNumber || '',
-              product: data.product || '',
-              supplier: data.supplier || '',
-              quantity: quantity,
-              quantityUoM: safeQuantityUoM,
+              date: formattedDate,
+              invoiceNumber: data.invoiceNumber || "",
+              product: data.product || "",
+              supplier: data.supplier || "",
+              quantity: Number(data.quantity) || 0,
               costOfUnit: Number(data.costOfUnit) || 0,
               costOfUnitOfMeasure: Number(data.costOfUnitOfMeasure) || 0,
-              purchUnitQty: purchUnitQty,
-              unitOfMeasure: data.unitOfMeasure || '',
-              purchaseUnit: data.purchaseUnit || '',
+              purchUnitQty: Number(data.purchUnitQty) || 0,
+              unitOfMeasure: data.unitOfMeasure || "",
+              purchaseUnit: data.purchaseUnit || "",
               totalCost: Number(data.totalCost) || 0,
             } as PurchaseOrder;
           });
 
+          console.log("Fetched Purchase Orders:", purchaseOrders);
           setPurchaseOrderList(purchaseOrders);
           setLoading(false);
         });
 
-        const rawGoodsRef = collection(db, 'rawGoods');
+        // Fetch Raw Goods
+        const rawGoodsRef = collection(db, "rawGoods");
         const rawGoodsSnapshot = await getDocs(
-          query(rawGoodsRef, where('userId', '==', auth.currentUser.uid))
+          query(rawGoodsRef, where("userId", "==", auth.currentUser.uid))
         );
         const rawGoods = rawGoodsSnapshot.docs.map((doc) => ({
           id: doc.id,
-          name: doc.data().name || '',
+          name: doc.data().name || "",
           qtyOnHand: Number(doc.data().qtyOnHand) || 0,
-          averageCostOfUnitOfMeasure:
-            Number(doc.data().averageCostOfUnitOfMeasure) || 0,
-          lastCostOfUnitOfMeasure:
-            Number(doc.data().lastCostOfUnitOfMeasure) || 0,
-          lastCostOfUnit: Number(doc.data().lastCostOfUnit) || 0,
-          unitOfMeasure: doc.data().unitOfMeasure || '',
-          purchaseUnit: doc.data().purchaseUnit || '',
+          averageCostOfUnitOfMeasure: Number(doc.data().averageCostOfUnitOfMeasure) || 0,
+          lastCostOfUnitOfMeasure: Number(doc.data().lastCostOfUnitOfMeasure) || 0,
+          unitOfMeasure: doc.data().unitOfMeasure || "",
+          purchaseUnit: doc.data().purchaseUnit || "",
           costOfUnit: Number(doc.data().costOfUnit) || 0,
           purchUnitQty: Number(doc.data().purchUnitQty) || 0,
           date: doc.data().date,
         }));
         setRawGoodsList(rawGoods);
 
-        const supplierRef = collection(db, 'suppliers');
+        // Fetch Suppliers
+        const supplierRef = collection(db, "suppliers");
         const supplierSnapshot = await getDocs(
-          query(supplierRef, where('userId', '==', auth.currentUser.uid))
+          query(supplierRef, where("userId", "==", auth.currentUser.uid))
         );
         const supplierNames = supplierSnapshot.docs.map(
-          (doc) => doc.data().name || ''
+          (doc) => doc.data().name || ""
         );
         setSupplierList(supplierNames);
       } catch (error) {
-        console.error('Error setting up listeners: ', error);
-        setError('An error occurred while fetching data. Please try again.');
+        console.error("Error setting up listeners: ", error);
+        setError("An error occurred while fetching data. Please try again.");
         setLoading(false);
       }
     };
@@ -358,44 +289,33 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
     };
   }, [userLoggedIn]);
 
+  // Handle changes in the product form
   const handleProductInputChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
   ) => {
     const { name, value } = e.target;
 
-    if (name === 'product' && value) {
-      if (checkDuplicateProduct(value) && editingProductIndex === null) {
-        setProductError('This product is already added to the current order');
+    if (name === "product" && value) {
+      if (checkDuplicateProduct(value) && !editingPurchaseOrderId) {
+        setProductError("This product is already added to the current order");
         return;
       } else {
-        setProductError('');
-      }
-
-      const selectedRawGood = rawGoodsList.find((rg) => rg.name === value);
-      if (selectedRawGood) {
-        setCurrentProduct((prev) => ({
-          ...prev,
-          product: value,
-          unitOfMeasure: selectedRawGood.unitOfMeasure,
-          purchaseUnit: selectedRawGood.purchaseUnit,
-          costOfUnit: selectedRawGood.costOfUnit,
-          purchUnitQty: selectedRawGood.purchUnitQty,
-        }));
+        setProductError("");
       }
     }
 
     if (
-      name === 'quantity' ||
-      name === 'costOfUnit' ||
-      name === 'purchUnitQty'
+      name === "quantity" ||
+      name === "costOfUnit" ||
+      name === "purchUnitQty"
     ) {
       if (isNaN(Number(value))) {
         setInputErrors({
           ...inputErrors,
-          [name]: 'Please enter a valid number',
+          [name]: "Please enter a valid number",
         });
       } else {
-        setInputErrors({ ...inputErrors, [name]: '' });
+        setInputErrors({ ...inputErrors, [name]: "" });
       }
 
       const newValues = {
@@ -403,22 +323,15 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
         [name]: Number(value),
       };
 
-      const quantity =
-        name === 'quantity' ? Number(value) : Number(currentProduct.quantity);
-      const costOfUnit =
-        name === 'costOfUnit' ? Number(value) : Number(currentProduct.costOfUnit);
-      const purchUnitQty =
-        name === 'purchUnitQty'
-          ? Number(value)
-          : Number(currentProduct.purchUnitQty);
-
-      newValues.totalCost = quantity * costOfUnit;
-      const adjustedPurchUnitQty = convertToBaseUnit(
-        purchUnitQty,
-        currentProduct.unitOfMeasure
-      );
-      newValues.costOfUnitOfMeasure =
-        adjustedPurchUnitQty > 0 ? costOfUnit / adjustedPurchUnitQty : 0;
+      if (name === "quantity" || name === "costOfUnit") {
+        const quantity =
+          name === "quantity" ? Number(value) : Number(currentProduct.quantity);
+        const costOfUnit =
+          name === "costOfUnit"
+            ? Number(value)
+            : Number(currentProduct.costOfUnit);
+        newValues.totalCost = quantity * costOfUnit;
+      }
 
       setCurrentProduct(newValues);
       return;
@@ -430,36 +343,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
     }));
   };
 
-  const handleHeaderChange = (
-    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
-  ) => {
-    const { name, value } = e.target;
-
-    if (name === 'date') {
-      setPurchaseOrderHeader((prev) => ({
-        ...prev,
-        date: value,
-      }));
-    } else {
-      setPurchaseOrderHeader((prev) => ({
-        ...prev,
-        [name]: value,
-      }));
-    }
-  };
-
-  const canAddProduct = () => {
-    return (
-      purchaseOrderHeader.date &&
-      purchaseOrderHeader.supplier &&
-      purchaseOrderHeader.invoiceNumber
-    );
-  };
-
-  const checkDuplicateProduct = (product: string) => {
-    return tempProducts.some((p) => p.product === product);
-  };
-
+  // Add or Update a product in the temporary products list
   const handleAddOrUpdateProduct = () => {
     const purchUnitQty = Number(currentProduct.purchUnitQty);
     const adjustedPurchUnitQty = convertToBaseUnit(
@@ -467,6 +351,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
       currentProduct.unitOfMeasure
     );
 
+    // Calculate costOfUnitOfMeasure for the current purchase
     const costOfUnitOfMeasure =
       adjustedPurchUnitQty !== 0
         ? Number(currentProduct.costOfUnit) / adjustedPurchUnitQty
@@ -478,64 +363,38 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
       costOfUnit: Number(currentProduct.costOfUnit) || 0,
       purchUnitQty: purchUnitQty,
       totalCost:
-        Number(currentProduct.quantity || 0) *
-        Number(currentProduct.costOfUnit || 0),
+        Number(currentProduct.quantity || 0) * Number(currentProduct.costOfUnit || 0),
       costOfUnitOfMeasure: costOfUnitOfMeasure,
     };
 
-    if (editingProductIndex !== null) {
+    if (editingPurchaseOrderId) {
+      // Update existing purchase order
       setTempProducts((prev) =>
-        prev.map((product, index) =>
-          index === editingProductIndex ? newProduct : product
+        prev.map((product) =>
+          // Find the product being edited
+          purchaseOrderList.find((po) => po.id === editingPurchaseOrderId)?.product === product.product
+            ? newProduct
+            : product
         )
       );
-      setEditingProductIndex(null);
+      setEditingPurchaseOrderId(null);
     } else {
+      // Add new product
       setTempProducts((prev) => [...prev, newProduct]);
     }
 
     setCurrentProduct(initialProduct);
     setShowProductForm(false);
-    setProductError('');
   };
 
-  const removeProduct = (index: number) => {
-    setTempProducts((prev) => prev.filter((_, i) => i !== index));
-    if (editingProductIndex === index) {
-      setShowProductForm(false);
-      setEditingProductIndex(null);
-      setCurrentProduct(initialProduct);
-      setProductError('');
-    }
-  };
-
-  const calculateTotalOrderCost = () => {
-    return tempProducts.reduce(
-      (sum, product) => sum + (Number(product.totalCost) || 0),
-      0
-    );
-  };
-
-  const handleDelete = async (id: string) => {
-    try {
-      const purchaseOrder = purchaseOrderList.find((po) => po.id === id);
-      if (purchaseOrder) {
-        await revertRawGoodsInventory(purchaseOrder);
-      }
-      await deleteDoc(doc(db, 'purchaseOrders', id));
-    } catch (error) {
-      console.error('Error deleting purchase order: ', error);
-      setError('Failed to delete purchase order. Please try again.');
-    }
-  };
-
+  // Update raw goods inventory based on the submitted purchase orders
   const updateRawGoodsInventory = async (products: TempProduct[]) => {
     try {
       for (const product of products) {
         const rawGood = rawGoodsList.find((rg) => rg.name === product.product);
         if (!rawGood) {
-          console.error('Raw good not found');
-          continue;
+          console.error("Raw good not found");
+          continue; // Skip if raw good not found
         }
 
         const adjustedPurchUnitQty = convertToBaseUnit(
@@ -546,6 +405,8 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
         const newPurchaseQuantity =
           Number(product.quantity) * adjustedPurchUnitQty;
         const currentQuantity = Number(rawGood.qtyOnHand);
+
+        // Calculate new average cost
         const currentTotalValue =
           currentQuantity * Number(rawGood.averageCostOfUnitOfMeasure);
         const newPurchaseValue =
@@ -556,24 +417,23 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
             ? (currentTotalValue + newPurchaseValue) / totalQuantity
             : 0;
 
-        const rawGoodRef = doc(db, 'rawGoods', rawGood.id);
+        const rawGoodRef = doc(db, "rawGoods", rawGood.id);
         await updateDoc(rawGoodRef, {
           qtyOnHand: totalQuantity,
           averageCostOfUnitOfMeasure: newAverageCost,
           lastCostOfUnitOfMeasure: product.costOfUnitOfMeasure,
-          lastCostOfUnit: product.costOfUnit,
-          date: Timestamp.now(),
+          date: Timestamp.now(), // Add timestamp for date tracking
         });
 
-        setRawGoodsList((prevList) =>
-          prevList.map((rg) =>
+        // Update the rawGoodsList state
+        setRawGoodsList((prevRawGoodsList) =>
+          prevRawGoodsList.map((rg) =>
             rg.id === rawGood.id
               ? {
                   ...rg,
                   qtyOnHand: totalQuantity,
                   averageCostOfUnitOfMeasure: newAverageCost,
                   lastCostOfUnitOfMeasure: product.costOfUnitOfMeasure,
-                  lastCostOfUnit: product.costOfUnit,
                   date: Timestamp.now(),
                 }
               : rg
@@ -581,16 +441,19 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
         );
       }
     } catch (error) {
-      console.error('Error updating raw goods:', error);
+      console.error("Error updating raw good:", error);
       throw error;
     }
   };
 
+  // Handle form submission to add or update purchase orders
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!auth.currentUser || tempProducts.length === 0) return;
 
     try {
+      console.log("Submitting Purchase Orders:", tempProducts);
+      // Add or Update each product in the purchase order
       for (const product of tempProducts) {
         const purchaseOrderData = {
           ...purchaseOrderHeader,
@@ -600,111 +463,176 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
           purchUnitQty: Number(product.purchUnitQty),
           totalCost: Number(product.totalCost),
           costOfUnitOfMeasure: Number(product.costOfUnitOfMeasure),
-          date: Timestamp.fromDate(new Date(purchaseOrderHeader.date)),
+          date: Timestamp.fromDate(new Date(purchaseOrderHeader.date)), // Store as Timestamp
           userId: auth.currentUser.uid,
         };
 
-        await addDoc(collection(db, 'purchaseOrders'), purchaseOrderData);
+        if (editingPurchaseOrderId) {
+          // Update existing purchase order
+          const purchaseOrderRef = doc(db, "purchaseOrders", editingPurchaseOrderId);
+          await updateDoc(purchaseOrderRef, purchaseOrderData);
+        } else {
+          // Add new purchase order
+          await addDoc(collection(db, "purchaseOrders"), purchaseOrderData);
+        }
       }
 
+      // Update raw goods inventory for all products
       await updateRawGoodsInventory(tempProducts);
 
+      // Reset form
       setPurchaseOrderHeader(initialPurchaseOrderHeader);
       setTempProducts([]);
       setShowProductForm(false);
       setCurrentProduct(initialProduct);
-      setProductError('');
+      setProductError("");
+      setEditingPurchaseOrderId(null);
+      resetFilters();
     } catch (error) {
-      console.error('Error adding/updating purchase orders:', error);
-      setError('Failed to save purchase orders. Please try again.');
+      console.error("Error adding/updating purchase orders:", error);
+      setError("Failed to save purchase orders. Please try again.");
     }
   };
 
-  const handleEditProduct = (index: number) => {
-    const productToEdit = tempProducts[index];
-    setCurrentProduct(productToEdit);
-    setEditingProductIndex(index);
-    setShowProductForm(true);
-    setProductError('');
+  // Remove a product from the temporary products list
+  const removeProduct = (index: number) => {
+    setTempProducts((prev) => prev.filter((_, i) => i !== index));
   };
 
+  // Calculate the total cost of the current order
+  const calculateTotalOrderCost = () => {
+    return tempProducts.reduce(
+      (sum, product) => sum + (Number(product.totalCost) || 0),
+      0
+    );
+  };
+
+  // Handle editing of a purchase order
+  const handleEdit = (purchaseOrder: PurchaseOrder) => {
+    setCurrentProduct({
+      product: purchaseOrder.product,
+      quantity: purchaseOrder.quantity,
+      costOfUnit: purchaseOrder.costOfUnit,
+      purchUnitQty: purchaseOrder.purchUnitQty,
+      unitOfMeasure: purchaseOrder.unitOfMeasure,
+      purchaseUnit: purchaseOrder.purchaseUnit,
+      totalCost: purchaseOrder.totalCost,
+      costOfUnitOfMeasure: purchaseOrder.costOfUnitOfMeasure,
+    });
+    setPurchaseOrderHeader({
+      date: dayjs(purchaseOrder.date, "MM/DD/YYYY").format("YYYY-MM-DD"),
+      supplier: purchaseOrder.supplier,
+      invoiceNumber: purchaseOrder.invoiceNumber,
+    });
+    setEditingPurchaseOrderId(purchaseOrder.id);
+    setShowProductForm(true);
+    setProductError("");
+  };
+
+  // Handle deletion of a purchase order
+  const handleDelete = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, "purchaseOrders", id));
+    } catch (error) {
+      console.error("Error deleting purchase order: ", error);
+      setError("Failed to delete purchase order. Please try again.");
+    }
+  };
+
+  // Get unit suffix based on unit of measure
   const getUnitSuffix = (unitOfMeasure: string): string => {
     switch (unitOfMeasure) {
-      case 'Grams':
-        return 'gr';
-      case 'Kilograms':
-        return 'kg';
-      case 'Milliliters':
-        return 'ml';
-      case 'Litres':
-        return 'lt';
-      case 'Count':
-        return 'cnt';
+      case "Grams":
+        return "gr";
+      case "Kilograms":
+        return "kg";
+      case "Milliliters":
+        return "ml";
+      case "Litre":
+        return "lt";
+      case "Count":
+        return "cnt";
       default:
-        return '';
+        return "";
     }
   };
 
+  // Download the purchase orders list as a PDF
   const downloadPurchaseOrdersList = () => {
     try {
       const doc = new jsPDF();
 
       doc.setFontSize(18);
-      doc.text('Purchase Orders List', 14, 22);
+      doc.text("Purchase Orders List", 14, 22);
 
       doc.setFontSize(12);
       doc.text(restaurantName, 14, 32);
-      doc.text(`Date: ${dayjs().format('DD.MM.YYYY HH:mm')}`, 14, 38);
+      doc.text(`Date: ${new Date().toLocaleDateString()}`, 14, 38);
 
-      const tableBody = purchaseOrderList.map((order, index) => [
+      const tableBody = filteredPurchaseOrderList.map((order, index) => [
         index + 1,
-        order.formattedDate || '',
-        order.invoiceNumber || '',
-        order.product || '',
-        order.supplier || '',
-        `${order.quantity || 0} ${order.purchaseUnit || ''}`,
-        `${isNaN(order.quantityUoM) ? '0.00' : order.quantityUoM.toFixed(2)} ${getUnitSuffix(
-          order.unitOfMeasure || ''
-        )}`,
+        order.date || "",
+        order.invoiceNumber || "",
+        order.product || "",
+        order.supplier || "",
+        `${order.quantity || 0} ${order.purchaseUnit || ""}`,
         `€ ${(Number(order.costOfUnit) || 0).toFixed(2)}`,
         `€ ${(Number(order.costOfUnitOfMeasure) || 0).toFixed(4)}`,
+        `${order.purchUnitQty} ${getUnitSuffix(order.unitOfMeasure || "")}`,
+        order.purchaseUnit || "",
         `€ ${(Number(order.totalCost) || 0).toFixed(2)}`,
       ]);
 
-      (doc as any).autoTable({
+      doc.autoTable({
         head: [
           [
-            'Order ID',
-            'Date',
-            'Invoice #',
-            'Raw Good',
-            'Supplier',
-            'Quantity',
-            'Quantity (UoM)',
-            'Cost (Unit)',
-            'Cost (UoM)',
-            'Total Cost',
+            "Order ID",
+            "Date",
+            "Invoice #",
+            "Raw Good",
+            "Supplier",
+            "Quantity",
+            "Cost (Unit)",
+            "Cost (Unit of Measure)",
+            "Purch. Unit Qty",
+            "Purchase Unit",
+            "Total Cost",
           ],
         ],
         body: tableBody,
         startY: 45,
       });
 
-      doc.save('purchase_orders_list.pdf');
+      doc.save("purchase_orders_list.pdf");
     } catch (error) {
-      console.error('Error generating PDF:', error);
-      setError('Failed to generate PDF. Please try again.');
+      console.error("Error generating PDF:", error);
+      setError("Failed to generate PDF. Please try again.");
     }
   };
 
-  // Filtreleme ve sıralama fonksiyonları
+  // Toggle the visibility of filter popups
   const toggleFilterPopup = (key: string) => {
-    setFilterPopupVisible((prev) => ({
-      ...prev,
-      [key]: !prev[key],
-    }));
+    setFilterPopupVisible((prev) => {
+      if (prev[key] && filterTimers.current[key]) {
+        clearTimeout(filterTimers.current[key]);
+      }
+      return {
+        ...prev,
+        [key]: !prev[key],
+      };
+    });
+
+    if (!filterPopupVisible[key]) {
+      filterTimers.current[key] = setTimeout(() => {
+        setFilterPopupVisible((prev) => ({
+          ...prev,
+          [key]: false,
+        }));
+      }, 3000);
+    }
   };
 
+  // Handle changes in filter options
   const handleFilterChange = (key: string, value: any) => {
     setFilters((prev) => ({
       ...prev,
@@ -714,107 +642,107 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
       ...prev,
       [key]: false,
     }));
+    if (filterTimers.current[key]) {
+      clearTimeout(filterTimers.current[key]);
+    }
   };
 
-  const applySorting = (key: string, direction: 'ascending' | 'descending') => {
+  // Apply sorting based on column
+  const applySorting = (key: string, direction: "ascending" | "descending") => {
     setSortConfig({ key, direction });
     setFilterPopupVisible((prev) => ({
       ...prev,
       [key]: false,
     }));
+    if (filterTimers.current[key]) {
+      clearTimeout(filterTimers.current[key]);
+    }
   };
 
+  // Handle changes in the date range filter
+  const handleDateRangeChange = (
+    e: React.ChangeEvent<HTMLInputElement>,
+    type: "start" | "end"
+  ) => {
+    const value = e.target.value;
+    const updatedDateRange = { ...dateRange, [type]: value };
+    setDateRange(updatedDateRange);
+    setFilters((prev) => ({
+      ...prev,
+      dateRange: updatedDateRange,
+    }));
+
+    if (updatedDateRange.start && updatedDateRange.end) {
+      setFilterPopupVisible((prev) => ({
+        ...prev,
+        date: false,
+      }));
+      if (filterTimers.current["date"]) {
+        clearTimeout(filterTimers.current["date"]);
+      }
+    }
+  };
+
+  // Reset all filters
   const resetFilters = () => {
     setFilters({});
+    setDateRange({ start: "", end: "" });
     setSortConfig(null);
-    setDateRange({ startDate: '', endDate: '' });
   };
 
+  // Get unique values for filtering
   const getUniqueValues = (key: string) => {
-    return Array.from(new Set(purchaseOrderList.map((item) => item[key])));
+    return Array.from(new Set(purchaseOrderList.map((order) => order[key])));
   };
 
-  const isFilterActive = (key: string) => {
-    if (filters[key]) return true;
-    if (sortConfig?.key === key) return true;
-    if (key === 'date' && dateRange.startDate && dateRange.endDate) return true;
-    return false;
-  };
-
-  const handleDateRangeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, value } = e.target;
-    setDateRange((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
-  };
-
-  const clearDateRangeFilter = () => {
-    setDateRange({ startDate: '', endDate: '' });
-    setFilterPopupVisible((prev) => ({
-      ...prev,
-      date: false,
-    }));
-  };
-
-  const filteredPurchaseOrders = purchaseOrderList
-    .filter((item) => {
+  // Filter and sort the purchase orders list
+  const filteredPurchaseOrderList = purchaseOrderList
+    .filter((order) => {
       let isVisible = true;
 
+      // Date Range Filter
+      if (filters.dateRange && filters.dateRange.start && filters.dateRange.end) {
+        isVisible =
+          isVisible &&
+          dayjs(order.date, "MM/DD/YYYY").isAfter(dayjs(filters.dateRange.start).subtract(1, "day")) &&
+          dayjs(order.date, "MM/DD/YYYY").isBefore(dayjs(filters.dateRange.end).add(1, "day"));
+      }
+
+      // Other Filters
       Object.keys(filters).forEach((key) => {
-        if (filters[key]) {
-          isVisible =
-            isVisible &&
-            item[key]?.toString().toLowerCase() === filters[key].toString().toLowerCase();
+        if (key !== "dateRange" && filters[key]) {
+          if (typeof filters[key] === "string") {
+            isVisible =
+              isVisible &&
+              order[key]?.toString().toLowerCase() ===
+                filters[key].toString().toLowerCase();
+          }
         }
       });
-
-      if (dateRange.startDate && dateRange.endDate && item.date) {
-        const itemDate = dayjs(item.date.toDate());
-        const startDate = dayjs(dateRange.startDate);
-        const endDate = dayjs(dateRange.endDate).endOf('day');
-        isVisible =
-          isVisible && itemDate.isBetween(startDate, endDate, null, '[]');
-      }
 
       return isVisible;
     })
     .sort((a, b) => {
       if (!sortConfig) return 0;
       const { key, direction } = sortConfig;
-      let aValue = a[key];
-      let bValue = b[key];
-
-      if (key === 'date') {
-        aValue = a.date ? a.date.toDate() : null;
-        bValue = b.date ? b.date.toDate() : null;
+      const aValue = a[key];
+      const bValue = b[key];
+      if (aValue < bValue) {
+        return direction === "ascending" ? -1 : 1;
       }
-
-      if (aValue < bValue || aValue === null) {
-        return direction === 'ascending' ? -1 : 1;
-      }
-      if (aValue > bValue || bValue === null) {
-        return direction === 'ascending' ? 1 : -1;
+      if (aValue > bValue) {
+        return direction === "ascending" ? 1 : -1;
       }
       return 0;
     });
 
-  // Arka plan renkleri için renk dizisi
-  const rowColors = [
-    'bg-blue-100',
-    'bg-green-100',
-    'bg-yellow-100',
-    'bg-pink-100',
-    'bg-purple-100',
-    'bg-indigo-100',
-    'bg-teal-100',
-    'bg-red-100',
-    'bg-gray-100',
-  ];
-
-  // Fatura numarası ile renk eşleştirmesi
-  const invoiceColorMap: { [key: string]: string } = {};
-  let colorIndex = 0;
+  // Check if a filter is active
+  const isFilterActive = (key: string) => {
+    if (key === "date") {
+      return filters.dateRange && (filters.dateRange.start || filters.dateRange.end);
+    }
+    return filters[key];
+  };
 
   return (
     <Layout logo={logo} restaurantName={restaurantName}>
@@ -825,15 +753,15 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
           </p>
         ) : (
           <>
+            {/* New Purchase Order Form */}
             <div className="max-w-4xl mx-auto">
               <div className="bg-blue-500 rounded-lg shadow-lg p-6 mb-6">
                 <h2 className="text-xl font-semibold mb-4 text-white">
-                  {editingProductIndex !== null
-                    ? 'Update Product'
-                    : 'New Purchase Order'}
+                  {editingPurchaseOrderId ? "Update Purchase Order" : "New Purchase Order"}
                 </h2>
 
                 <form onSubmit={handleSubmit} className="space-y-4">
+                  {/* Purchase Order Header */}
                   <div className="grid grid-cols-3 gap-4 mb-4">
                     <div>
                       <label
@@ -843,7 +771,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                         Date
                       </label>
                       <input
-                        type="datetime-local"
+                        type="date"
                         name="date"
                         id="date"
                         value={purchaseOrderHeader.date}
@@ -895,6 +823,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                     </div>
                   </div>
 
+                  {/* Add or Update Product Button */}
                   {canAddProduct() && !showProductForm && (
                     <button
                       type="button"
@@ -906,12 +835,11 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                     </button>
                   )}
 
+                  {/* Product Form */}
                   {showProductForm && (
                     <div className="bg-white p-4 rounded-lg mt-4">
                       <h3 className="text-lg font-semibold mb-4 text-gray-800">
-                        {editingProductIndex !== null
-                          ? 'Update Product Details'
-                          : 'Add Product Details'}
+                        {editingPurchaseOrderId ? "Update Product" : "Add Product Details"}
                       </h3>
                       <div className="grid grid-cols-2 gap-4 mb-4">
                         <div>
@@ -927,7 +855,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                             value={currentProduct.product}
                             onChange={handleProductInputChange}
                             className={`w-full p-2 border rounded text-sm ${
-                              productError ? 'border-red-500' : ''
+                              productError ? "border-red-500" : ""
                             }`}
                             required
                           >
@@ -963,7 +891,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                             <option value="Grams">Grams</option>
                             <option value="Kilograms">Kilograms</option>
                             <option value="Milliliters">Milliliters</option>
-                            <option value="Litres">Litres</option>
+                            <option value="Litre">Litre</option>
                             <option value="Count">Count</option>
                           </select>
                         </div>
@@ -996,6 +924,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                       </div>
 
                       <div className="grid grid-cols-3 gap-4 mb-4">
+                        {/* Quantity Input */}
                         <div>
                           <label
                             htmlFor="quantity"
@@ -1008,7 +937,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                               type="number"
                               name="quantity"
                               id="quantity"
-                              value={currentProduct.quantity || ''}
+                              value={currentProduct.quantity || ""}
                               onChange={handleProductInputChange}
                               className="w-full p-2 border rounded text-sm pr-16"
                               required
@@ -1026,6 +955,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                           )}
                         </div>
 
+                        {/* Purchase Unit Quantity Input */}
                         <div>
                           <label
                             htmlFor="purchUnitQty"
@@ -1038,7 +968,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                               type="number"
                               name="purchUnitQty"
                               id="purchUnitQty"
-                              value={currentProduct.purchUnitQty || ''}
+                              value={currentProduct.purchUnitQty || ""}
                               onChange={handleProductInputChange}
                               className="w-full p-2 border rounded text-sm pr-12"
                               required
@@ -1056,6 +986,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                           )}
                         </div>
 
+                        {/* Cost (Unit) Input */}
                         <div>
                           <label
                             htmlFor="costOfUnit"
@@ -1068,7 +999,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                               type="number"
                               name="costOfUnit"
                               id="costOfUnit"
-                              value={currentProduct.costOfUnit || ''}
+                              value={currentProduct.costOfUnit || ""}
                               onChange={handleProductInputChange}
                               className="w-full p-2 border rounded text-sm pr-8"
                               required
@@ -1090,9 +1021,9 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                           type="button"
                           onClick={() => {
                             setShowProductForm(false);
-                            setEditingProductIndex(null);
+                            setEditingPurchaseOrderId(null);
                             setCurrentProduct(initialProduct);
-                            setProductError('');
+                            setProductError("");
                           }}
                           className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
                         >
@@ -1103,14 +1034,13 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                           onClick={handleAddOrUpdateProduct}
                           className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
                         >
-                          {editingProductIndex !== null
-                            ? 'Update Product'
-                            : 'Add Product'}
+                          {editingPurchaseOrderId ? "Update Product" : "Add Product"}
                         </button>
                       </div>
                     </div>
                   )}
 
+                  {/* Temporary Products List */}
                   {tempProducts.length > 0 && (
                     <div className="mt-4 bg-white rounded-lg p-4">
                       <h3 className="text-lg font-semibold mb-2">
@@ -1119,40 +1049,19 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                       <table className="min-w-full">
                         <thead className="bg-gray-50">
                           <tr>
-                            <th
-                              className="px-4 py-2 text-left"
-                              style={{ width: '25%' }}
-                            >
+                            <th className="px-4 py-2 text-left" style={{ width: "30%" }}>
                               Product
                             </th>
-                            <th
-                              className="px-4 py-2 text-center"
-                              style={{ width: '15%' }}
-                            >
+                            <th className="px-4 py-2 text-center" style={{ width: "20%" }}>
                               Quantity
                             </th>
-                            <th
-                              className="px-4 py-2 text-center"
-                              style={{ width: '15%' }}
-                            >
-                              Quantity (UoM)
-                            </th>
-                            <th
-                              className="px-4 py-2 text-center"
-                              style={{ width: '15%' }}
-                            >
+                            <th className="px-4 py-2 text-center" style={{ width: "20%" }}>
                               Unit Cost
                             </th>
-                            <th
-                              className="px-4 py-2 text-center"
-                              style={{ width: '20%' }}
-                            >
+                            <th className="px-4 py-2 text-center" style={{ width: "20%" }}>
                               Total Cost
                             </th>
-                            <th
-                              className="px-4 py-2 text-center"
-                              style={{ width: '10%' }}
-                            >
+                            <th className="px-4 py-2 text-center" style={{ width: "10%" }}>
                               Actions
                             </th>
                           </tr>
@@ -1167,13 +1076,6 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                                 {product.quantity} {product.purchaseUnit}
                               </td>
                               <td className="px-4 py-2 text-center">
-                                {(
-                                  Number(product.quantity) *
-                                  Number(product.purchUnitQty)
-                                ).toFixed(2)}{' '}
-                                {getUnitSuffix(product.unitOfMeasure)}
-                              </td>
-                              <td className="px-4 py-2 text-center">
                                 €{(Number(product.costOfUnit) || 0).toFixed(2)}
                               </td>
                               <td className="px-4 py-2 text-center">
@@ -1181,15 +1083,13 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                               </td>
                               <td className="px-4 py-2 text-center">
                                 <button
-                                  type="button"
-                                  onClick={() => handleEditProduct(index)}
+                                  onClick={() => handleEdit(purchaseOrderList[index])}
                                   className="text-blue-500 hover:text-blue-700 mr-2"
                                   title="Edit"
                                 >
                                   <Edit2 size={18} />
                                 </button>
                                 <button
-                                  type="button"
                                   onClick={() => removeProduct(index)}
                                   className="text-red-500 hover:text-red-700"
                                   title="Delete"
@@ -1200,7 +1100,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                             </tr>
                           ))}
                           <tr className="bg-gray-50 font-semibold">
-                            <td colSpan={4} className="px-4 py-2 text-right">
+                            <td colSpan={3} className="px-4 py-2 text-right">
                               Total Order Cost:
                             </td>
                             <td className="px-4 py-2 text-center">
@@ -1215,7 +1115,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                         type="submit"
                         className="mt-4 bg-green-500 text-white px-6 py-2 rounded hover:bg-green-600"
                       >
-                        Submit Purchase Order
+                        {editingPurchaseOrderId ? "Update Purchase Order" : "Submit Purchase Order"}
                       </button>
                     </div>
                   )}
@@ -1223,6 +1123,7 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
               </div>
             </div>
 
+            {/* Existing Purchase Orders List */}
             <div className="bg-white bg-opacity-80 rounded-lg shadow-lg p-6 mb-4 overflow-x-auto">
               <h2 className="text-2xl font-semibold mb-4">
                 Purchase Orders List
@@ -1238,17 +1139,23 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                   <table className="min-w-full bg-white">
                     <thead className="bg-gray-100">
                       <tr>
+                        <th className="py-2 px-4 border-b text-center">
+                          Order ID
+                        </th>
                         {[
-                          { key: 'id', label: 'Order ID' },
-                          { key: 'date', label: 'Date' },
-                          { key: 'invoiceNumber', label: 'Invoice #' },
-                          { key: 'product', label: 'Raw Good' },
-                          { key: 'supplier', label: 'Supplier' },
-                          { key: 'quantity', label: 'Quantity' },
-                          { key: 'quantityUoM', label: 'Quantity (UoM)' },
-                          { key: 'costOfUnit', label: 'Cost (Unit)' },
-                          { key: 'costOfUnitOfMeasure', label: 'Cost (UoM)' },
-                          { key: 'totalCost', label: 'Total Cost' },
+                          { key: "date", label: "Date" },
+                          { key: "invoiceNumber", label: "Invoice #" },
+                          { key: "product", label: "Raw Good" },
+                          { key: "supplier", label: "Supplier" },
+                          { key: "quantity", label: "Quantity" },
+                          { key: "costOfUnit", label: "Cost (Unit)" },
+                          {
+                            key: "costOfUnitOfMeasure",
+                            label: "Cost (Unit of Measure)",
+                          },
+                          { key: "purchUnitQty", label: "Purch. Unit Qty" },
+                          { key: "purchaseUnit", label: "Purchase Unit" },
+                          { key: "totalCost", label: "Total Cost" },
                         ].map((column) => (
                           <th
                             key={column.key}
@@ -1256,93 +1163,90 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                           >
                             <div className="flex items-center justify-center">
                               {column.label}
-                              {column.key !== 'id' && (
-                                <button
-                                  onClick={() => toggleFilterPopup(column.key)}
-                                  className={`ml-2 hover:text-gray-800 ${
-                                    isFilterActive(column.key)
-                                      ? 'text-red-500'
-                                      : 'text-gray-600'
-                                  }`}
-                                >
-                                  <Filter size={16} />
-                                </button>
-                              )}
+                              <button
+                                type="button"
+                                onClick={() => toggleFilterPopup(column.key)}
+                                className={`ml-2 hover:text-gray-800 ${
+                                  isFilterActive(column.key)
+                                    ? "text-red-500"
+                                    : "text-gray-600"
+                                }`}
+                              >
+                                <Filter size={16} />
+                              </button>
                             </div>
                             {filterPopupVisible[column.key] && (
                               <div className="absolute bg-white border rounded shadow p-2 mt-2 z-10">
-                                {['quantity', 'quantityUoM', 'costOfUnit', 'costOfUnitOfMeasure', 'totalCost'].includes(
-                                  column.key
-                                ) ? (
+                                {column.key === "date" ? (
+                                  <div>
+                                    <label className="block text-sm mb-1">
+                                      Start Date:
+                                    </label>
+                                    <input
+                                      type="date"
+                                      value={dateRange.start}
+                                      onChange={(e) =>
+                                        handleDateRangeChange(e, "start")
+                                      }
+                                      className="w-full p-1 border rounded mb-2 text-sm"
+                                    />
+                                    <label className="block text-sm mb-1">
+                                      End Date:
+                                    </label>
+                                    <input
+                                      type="date"
+                                      value={dateRange.end}
+                                      onChange={(e) =>
+                                        handleDateRangeChange(e, "end")
+                                      }
+                                      className="w-full p-1 border rounded mb-2 text-sm"
+                                    />
+                                  </div>
+                                ) : ["quantity", "costOfUnit", "costOfUnitOfMeasure", "purchUnitQty", "totalCost"].includes(
+                                    column.key
+                                  ) ? (
                                   <div>
                                     <button
-                                      onClick={() => applySorting(column.key, 'ascending')}
+                                      type="button"
+                                      onClick={() =>
+                                        applySorting(column.key, "ascending")
+                                      }
                                       className="block w-full text-left px-2 py-1 text-sm hover:bg-gray-100"
                                     >
                                       Sort Ascending
                                     </button>
                                     <button
-                                      onClick={() => applySorting(column.key, 'descending')}
+                                      type="button"
+                                      onClick={() =>
+                                        applySorting(column.key, "descending")
+                                      }
                                       className="block w-full text-left px-2 py-1 text-sm hover:bg-gray-100"
                                     >
                                       Sort Descending
                                     </button>
                                   </div>
-                                ) : column.key === 'date' ? (
-                                  <div>
-                                    <label className="block text-sm font-medium text-gray-700">
-                                      Start Date
-                                    </label>
-                                    <input
-                                      type="date"
-                                      name="startDate"
-                                      value={dateRange.startDate}
-                                      onChange={handleDateRangeChange}
-                                      className="w-full p-2 border rounded text-sm mb-2"
-                                    />
-                                    <label className="block text-sm font-medium text-gray-700">
-                                      End Date
-                                    </label>
-                                    <input
-                                      type="date"
-                                      name="endDate"
-                                      value={dateRange.endDate}
-                                      onChange={handleDateRangeChange}
-                                      className="w-full p-2 border rounded text-sm mb-2"
-                                    />
-                                    <div className="flex justify-end mt-2">
-                                      <button
-                                        onClick={() => {
-                                          setFilterPopupVisible((prev) => ({
-                                            ...prev,
-                                            date: false,
-                                          }));
-                                        }}
-                                        className="bg-blue-500 text-white px-4 py-2 rounded mr-2"
-                                      >
-                                        Apply
-                                      </button>
-                                      <button
-                                        onClick={clearDateRangeFilter}
-                                        className="bg-gray-500 text-white px-4 py-2 rounded"
-                                      >
-                                        Clear
-                                      </button>
-                                    </div>
-                                  </div>
                                 ) : (
                                   <div>
-                                    {getUniqueValues(column.key).map((value, idx) => (
-                                      <div key={idx} className="flex items-center mb-1">
-                                        <input
-                                          type="checkbox"
-                                          checked={filters[column.key] === value}
-                                          onChange={() => handleFilterChange(column.key, value)}
-                                          className="mr-2"
-                                        />
-                                        <label className="text-sm">{value}</label>
-                                      </div>
-                                    ))}
+                                    {getUniqueValues(column.key).map(
+                                      (value, idx) => (
+                                        <div
+                                          key={idx}
+                                          className="flex items-center mb-1"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={filters[column.key] === value}
+                                            onChange={() =>
+                                              handleFilterChange(column.key, value)
+                                            }
+                                            className="mr-2"
+                                          />
+                                          <label className="text-sm">
+                                            {value}
+                                          </label>
+                                        </div>
+                                      )
+                                    )}
                                   </div>
                                 )}
                               </div>
@@ -1353,61 +1257,65 @@ const PurchaseOrders: React.FC<PurchaseOrdersProps> = ({
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredPurchaseOrders.map((order, index) => {
-                        // Fatura numarasına göre renk atama
-                        const invoiceNumber = order.invoiceNumber;
-                        if (!invoiceColorMap[invoiceNumber]) {
-                          invoiceColorMap[invoiceNumber] =
-                            rowColors[colorIndex % rowColors.length];
-                          colorIndex++;
-                        }
-                        const rowColor = invoiceColorMap[invoiceNumber];
-
-                        return (
-                          <tr key={order.id} className={`hover:bg-gray-50 ${rowColor}`}>
-                            <td className="py-2 px-4 border-b text-center">
-                              {index + 1}
-                            </td>
-                            <td className="py-2 px-4 border-b text-center">
-                              {order.formattedDate}
-                            </td>
-                            <td className="py-2 px-4 border-b text-center">
-                              {order.invoiceNumber}
-                            </td>
-                            <td className="py-2 px-4 border-b text-center">
-                              {order.product}
-                            </td>
-                            <td className="py-2 px-4 border-b text-center">
-                              {order.supplier}
-                            </td>
-                            <td className="py-2 px-4 border-b text-center">
-                              {order.quantity} {order.purchaseUnit}
-                            </td>
-                            <td className="py-2 px-4 border-b text-center">
-                              {isNaN(order.quantityUoM) ? '0.00' : order.quantityUoM.toFixed(2)}{' '}
+                      {filteredPurchaseOrderList.map((order, index) => (
+                        <tr key={order.id} className="hover:bg-gray-50">
+                          <td className="py-2 px-4 border-b text-center">
+                            {index + 1}
+                          </td>
+                          <td className="py-2 px-4 border-b text-center">
+                            {order.date}
+                          </td>
+                          <td className="py-2 px-4 border-b text-center">
+                            {order.invoiceNumber}
+                          </td>
+                          <td className="py-2 px-4 border-b text-center">
+                            {order.product}
+                          </td>
+                          <td className="py-2 px-4 border-b text-center">
+                            {order.supplier}
+                          </td>
+                          <td className="py-2 px-4 border-b text-center">
+                            {order.quantity}
+                            <span className="text-gray-600 ml-1">
+                              {order.purchaseUnit}
+                            </span>
+                          </td>
+                          <td className="py-2 px-4 border-b text-center">
+                            €{(Number(order.costOfUnit) || 0).toFixed(2)}
+                          </td>
+                          <td className="py-2 px-4 border-b text-center">
+                            €{(Number(order.costOfUnitOfMeasure) || 0).toFixed(4)}
+                          </td>
+                          <td className="py-2 px-4 border-b text-center">
+                            {order.purchUnitQty}
+                            <span className="text-gray-600 ml-1">
                               {getUnitSuffix(order.unitOfMeasure)}
-                            </td>
-                            <td className="py-2 px-4 border-b text-center">
-                              €{(Number(order.costOfUnit) || 0).toFixed(2)}
-                            </td>
-                            <td className="py-2 px-4 border-b text-center">
-                              €{(Number(order.costOfUnitOfMeasure) || 0).toFixed(4)}
-                            </td>
-                            <td className="py-2 px-4 border-b text-center">
-                              €{(Number(order.totalCost) || 0).toFixed(2)}
-                            </td>
-                            <td className="py-2 px-4 border-b text-center">
-                              <button
-                                onClick={() => handleDelete(order.id)}
-                                className="text-red-500 hover:text-red-700"
-                                title="Delete"
-                              >
-                                <Trash2 size={18} />
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
+                            </span>
+                          </td>
+                          <td className="py-2 px-4 border-b text-center">
+                            {order.purchaseUnit}
+                          </td>
+                          <td className="py-2 px-4 border-b text-center">
+                            €{(Number(order.totalCost) || 0).toFixed(2)}
+                          </td>
+                          <td className="py-2 px-4 border-b text-center">
+                            <button
+                              onClick={() => handleEdit(order)}
+                              className="text-blue-500 hover:text-blue-700 mr-2"
+                              title="Edit"
+                            >
+                              <Edit2 size={18} />
+                            </button>
+                            <button
+                              onClick={() => handleDelete(order.id)}
+                              className="text-red-500 hover:text-red-700"
+                              title="Delete"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                   {purchaseOrderList?.length > 0 && (

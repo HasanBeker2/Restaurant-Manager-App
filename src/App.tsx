@@ -1,23 +1,29 @@
-import React, { useState, useEffect } from "react";
-import { BrowserRouter as Router, Route, Routes, Navigate } from "react-router-dom";
-import { auth } from "./firebase";
-import { User as FirebaseUser } from "firebase/auth";
-import SignIn from "./components/SignIn";
-import NavigationHub from "./components/NavigationHub";
-import Dashboard from "./components/Dashboard";
-import StaffResources from "./components/StaffResources";
-import CustomerManagement from "./components/CustomerManagement";
-import PurchaseOrders from "./components/PurchaseOrders";
-import RawGoods from "./components/RawGoods";
-import BOMAssemblies from "./components/BOMAssemblies";
-import FinishedGoods from "./components/FinishedGoods";
-import WorkOrders from "./components/WorkOrders";
-import SalesOrders from "./components/SalesOrders";
+import React, { useState, useEffect } from 'react';
+import { BrowserRouter as Router, Route, Routes, Navigate } from 'react-router-dom';
+import { auth } from './firebase';
+import { User as FirebaseUser } from 'firebase/auth';
+import SignIn from './components/SignIn';
+import NavigationHub from './components/NavigationHub';
+import Dashboard from './components/Dashboard';
+import StaffResources from './components/StaffResources';
+import CustomerManagement from './components/CustomerManagement';
+import PurchaseOrders from './components/PurchaseOrders';
+import RawGoods from './components/RawGoods';
+import BOMAssemblies from './components/BOMAssemblies';
+import StockCount from './components/StockCount';
+import Suppliers from './components/Suppliers';
+import SalesOrders from './components/SalesOrders';
+import RawGoodsList from './components/RawGoodsList';
+import FinishedProductsList from './components/FinishedProductsList';
 
 const App: React.FC = () => {
   const [user, setUser] = useState<FirebaseUser | null>(null);
-  const [logo, setLogo] = useState<string>(() => localStorage.getItem('restaurantLogo') || '/path-to-dummy-logo.png');
-  const [restaurantName, setRestaurantName] = useState<string>(() => localStorage.getItem('restaurantName') || 'My Restaurant');
+  const [logo, setLogo] = useState<string>(
+    () => localStorage.getItem('restaurantLogo') || '/path-to-dummy-logo.png'
+  );
+  const [restaurantName, setRestaurantName] = useState<string>(
+    () => localStorage.getItem('restaurantName') || 'My Restaurant'
+  );
 
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged((user) => {
@@ -52,9 +58,9 @@ const App: React.FC = () => {
           path="/"
           element={
             user ? (
-              <NavigationHub 
-                logo={logo} 
-                restaurantName={restaurantName} 
+              <NavigationHub
+                logo={logo}
+                restaurantName={restaurantName}
                 updateLogoAndName={updateLogoAndName}
                 user={user}
               />
@@ -69,9 +75,12 @@ const App: React.FC = () => {
         <Route path="/purchase-orders" element={<PurchaseOrders {...pageProps} />} />
         <Route path="/raw-goods" element={<RawGoods {...pageProps} />} />
         <Route path="/bom-assemblies" element={<BOMAssemblies {...pageProps} />} />
-        <Route path="/finished-goods" element={<FinishedGoods {...pageProps} />} />
-        <Route path="/work-orders" element={<WorkOrders {...pageProps} />} />
+        <Route path="/stock-count" element={<StockCount {...pageProps} />} />
+        <Route path="/suppliers" element={<Suppliers {...pageProps} />} />
         <Route path="/sales-orders" element={<SalesOrders {...pageProps} />} />
+        {/* Yeni Rotalar */}
+        <Route path="/raw-goods-list" element={<RawGoodsList {...pageProps} />} />
+        <Route path="/finished-products-list" element={<FinishedProductsList {...pageProps} />} />
       </Routes>
     </Router>
   );

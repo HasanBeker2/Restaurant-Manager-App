@@ -1,6 +1,8 @@
+// BOMAssemblies.tsx
+
 import React, { useState, useEffect, useRef } from 'react';
 import Layout from './Layout';
-import { Trash2, Edit2, Plus, Filter, ArrowUp, ArrowDown } from 'lucide-react';
+import { Trash2, Edit2, Plus, Filter, Info } from 'lucide-react';
 import {
   collection,
   addDoc,
@@ -11,11 +13,12 @@ import {
   where,
   onSnapshot,
   getDocs,
-  getDoc,
 } from 'firebase/firestore';
 import { db, auth } from '../firebase';
 import { onAuthStateChanged } from 'firebase/auth';
-import dayjs from 'dayjs';
+import Tooltip from './Tooltip'; // Tooltip bileşeninizin doğru konumda olduğundan emin olun
+import jsPDF from 'jspdf';
+import 'jspdf-autotable';
 
 interface BOMAssembliesProps {
   logo: string;
@@ -33,7 +36,7 @@ interface BOMAssembly {
   profitPerItem: number;
   profitPercentagePerItem: number;
   assemblyItems: BOMAssemblyItem[];
-  timestamp: number;
+  userId: string;
 }
 
 interface BOMAssemblyItem {
@@ -81,17 +84,10 @@ interface BOMAssemblyItemForm {
   totalCost: number;
 }
 
-interface BOMChange {
-  totalCostChange: 'increase' | 'decrease' | null;
-  profitChange: 'increase' | 'decrease' | null;
-  salesPriceChange: 'increase' | 'decrease' | null;
-  timestamp: number;
-}
-
 const initialBOMAssembly: BOMAssemblyForm = {
   finishedProductName: '',
   articleNumber: '',
-  date: dayjs().format('DD.MM.YYYY HH:mm:ss'),
+  date: new Date().toISOString().split('T')[0],
   salesDescription: '',
   salesPrice: '',
   totalCost: 0,
@@ -110,6 +106,7 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
   });
   const [editingBOMAssembly, setEditingBOMAssembly] = useState<string | null>(null);
   const [selectedBOMAssembly, setSelectedBOMAssembly] = useState<BOMAssembly | null>(null);
+  const [costHistory, setCostHistory] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [userLoggedIn, setUserLoggedIn] = useState<boolean | null>(null);
@@ -127,8 +124,6 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
     totalCost: 0,
   });
   const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
-
-  // Filtreleme ve sıralama için state'ler
   const [filterPopupVisible, setFilterPopupVisible] = useState<{ [key: string]: boolean }>({});
   const [filters, setFilters] = useState<{ [key: string]: any }>({});
   const [sortConfig, setSortConfig] = useState<{
@@ -136,14 +131,9 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
     direction: 'ascending' | 'descending';
   } | null>(null);
   const filterTimers = useRef<{ [key: string]: NodeJS.Timeout }>({});
-
-  const previousRawGoods = useRef<RawGood[]>([]);
-
-  // BOM assembly değişim durumları
-  const [bomChanges, setBOMChanges] = useState<{ [id: string]: BOMChange }>({});
-
-  // Önceki BOM Assemblies'i izlemek için
-  const previousBomAssemblies = useRef<BOMAssembly[]>([]);
+  const [showPriceModal, setShowPriceModal] = useState<boolean>(false);
+  const [priceToUpdate, setPriceToUpdate] = useState<number>(0);
+  const [currentUpdateBOMId, setCurrentUpdateBOMId] = useState<string | null>(null);
 
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
@@ -170,50 +160,20 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
         const q = query(bomAssembliesRef, where('userId', '==', auth.currentUser.uid));
 
         unsubscribeBOMAssemblies = onSnapshot(q, (querySnapshot) => {
-          const assemblies = querySnapshot.docs.map((doc) => {
-            const data = doc.data() as BOMAssembly;
-            return {
-              id: doc.id,
-              ...data,
-              date: data.date || dayjs().format('DD.MM.YYYY HH:mm:ss'),
-            };
-          });
+          const assemblies = querySnapshot.docs.map(
+            (doc) => ({ id: doc.id, ...doc.data() } as BOMAssembly)
+          );
           setBOMAssemblies(assemblies);
           setLoading(false);
         });
 
-        // Raw Goods'i çekiyoruz ve dinleyici ekliyoruz
+        // Raw Goods'i çekiyoruz
         const rawGoodsRef = collection(db, 'rawGoods');
-        const rawGoodsQuery = query(rawGoodsRef, where('userId', '==', auth.currentUser.uid));
-
-        const unsubscribeRawGoods = onSnapshot(rawGoodsQuery, async (querySnapshot) => {
-          const updatedRawGoods = querySnapshot.docs.map(
-            (doc) => ({ id: doc.id, ...doc.data() } as RawGood)
-          );
-
-          // Önceki ve güncel rawGoods'ları karşılaştırıyoruz
-          if (previousRawGoods.current.length > 0) {
-            for (const updatedRawGood of updatedRawGoods) {
-              const previousRawGood = previousRawGoods.current.find(
-                (rg) => rg.id === updatedRawGood.id
-              );
-
-              if (
-                previousRawGood &&
-                updatedRawGood.lastCostOfUnitOfMeasure !== previousRawGood.lastCostOfUnitOfMeasure
-              ) {
-                // lastCostOfUnitOfMeasure değişti
-                await updateBOMAssembliesForRawGood(updatedRawGood);
-              }
-            }
-          }
-
-          // previousRawGoods'u güncelliyoruz
-          previousRawGoods.current = updatedRawGoods;
-
-          // rawGoods state'ini güncelliyoruz
-          setRawGoods(updatedRawGoods);
-        });
+        const rawGoodsSnapshot = await getDocs(rawGoodsRef);
+        const rawGoodsData = rawGoodsSnapshot.docs.map(
+          (doc) => ({ id: doc.id, ...doc.data() } as RawGood)
+        );
+        setRawGoods(rawGoodsData);
 
         // Other Costs'i çekiyoruz
         const otherCostsRef = collection(db, 'otherCosts');
@@ -222,10 +182,6 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
           (doc) => ({ id: doc.id, ...doc.data() } as OtherCost)
         );
         setOtherCosts(otherCostsData);
-
-        return () => {
-          unsubscribeRawGoods();
-        };
       } catch (error) {
         console.error('Error setting up listeners: ', error);
         setError('An error occurred while fetching data. Please try again.');
@@ -249,198 +205,15 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
     localStorage.setItem('newBOMAssembly', JSON.stringify(newBOMAssembly));
   }, [newBOMAssembly]);
 
-  // BOM Assemblies değişikliklerini izleyip bomChanges state'ini güncelle
-  useEffect(() => {
-    if (previousBomAssemblies.current.length > 0) {
-      const oneDay = 24 * 60 * 60 * 1000;
-      const changes: { [id: string]: BOMChange } = {};
-
-      bomAssemblies.forEach((assembly) => {
-        const prevAssembly = previousBomAssemblies.current.find((a) => a.id === assembly.id);
-        if (prevAssembly) {
-          const currentTime = Date.now();
-          const existingChange = bomChanges[assembly.id];
-
-          // Değişim durumlarını belirliyoruz
-          let totalCostChange: 'increase' | 'decrease' | null = null;
-          if (assembly.totalCost > prevAssembly.totalCost) {
-            totalCostChange = 'increase';
-          } else if (assembly.totalCost < prevAssembly.totalCost) {
-            totalCostChange = 'decrease';
-          } else if (existingChange) {
-            totalCostChange = existingChange.totalCostChange;
-          }
-
-          let profitChange: 'increase' | 'decrease' | null = null;
-          if (assembly.profitPerItem > prevAssembly.profitPerItem) {
-            profitChange = 'increase';
-          } else if (assembly.profitPerItem < prevAssembly.profitPerItem) {
-            profitChange = 'decrease';
-          } else if (existingChange) {
-            profitChange = existingChange.profitChange;
-          }
-
-          let salesPriceChange: 'increase' | 'decrease' | null = null;
-          if (assembly.salesPrice > prevAssembly.salesPrice) {
-            salesPriceChange = 'increase';
-          } else if (assembly.salesPrice < prevAssembly.salesPrice) {
-            salesPriceChange = 'decrease';
-          } else if (existingChange) {
-            salesPriceChange = existingChange.salesPriceChange;
-          }
-
-          // Zaman damgasını güncelliyoruz
-          let timestamp = currentTime;
-          if (existingChange && Date.now() - existingChange.timestamp < oneDay) {
-            timestamp = existingChange.timestamp;
-          }
-
-          if (totalCostChange || profitChange || salesPriceChange) {
-            changes[assembly.id] = {
-              totalCostChange,
-              profitChange,
-              salesPriceChange,
-              timestamp,
-            };
-          }
-        }
-      });
-
-      setBOMChanges((prev) => ({ ...prev, ...changes }));
-    }
-
-    previousBomAssemblies.current = bomAssemblies;
-  }, [bomAssemblies]);
-
-  const updateBOMAssembliesForRawGood = async (updatedRawGood: RawGood) => {
-    try {
-      const bomAssembliesRef = collection(db, 'bomAssemblies');
-      const q = query(bomAssembliesRef, where('userId', '==', auth.currentUser!.uid));
-      const bomAssembliesSnapshot = await getDocs(q);
-
-      const bomAssembliesToUpdate: BOMAssembly[] = [];
-
-      bomAssembliesSnapshot.forEach((doc) => {
-        const bomAssembly = { id: doc.id, ...doc.data() } as BOMAssembly;
-
-        const assemblyItemIndex = bomAssembly.assemblyItems.findIndex(
-          (item) => item.name === updatedRawGood.name && item.itemType === 'Raw Goods'
-        );
-
-        if (assemblyItemIndex !== -1) {
-          // Bu BOM Assembly, güncellenen raw good'u kullanıyor
-          const assemblyItem = bomAssembly.assemblyItems[assemblyItemIndex];
-
-          // purchaseCost ve totalCost güncellemesi
-          assemblyItem.purchaseCost = updatedRawGood.lastCostOfUnitOfMeasure;
-          assemblyItem.totalCost = assemblyItem.quantity * assemblyItem.purchaseCost;
-
-          // BOM Assembly totalCost, profitPerItem, profitPercentagePerItem güncellemesi
-          const totalCost = bomAssembly.assemblyItems.reduce(
-            (sum, item) => sum + item.totalCost,
-            0
-          );
-          const profitPerItem = bomAssembly.salesPrice - totalCost;
-          const profitPercentagePerItem =
-            bomAssembly.salesPrice > 0 ? (profitPerItem / bomAssembly.salesPrice) * 100 : 0;
-
-          // Tarih ve timestamp güncellemesi
-          const currentDate = dayjs().format('DD.MM.YYYY HH:mm:ss');
-          const timestamp = Date.now();
-
-          bomAssembly.assemblyItems[assemblyItemIndex] = assemblyItem;
-          bomAssembly.totalCost = totalCost;
-          bomAssembly.profitPerItem = profitPerItem;
-          bomAssembly.profitPercentagePerItem = profitPercentagePerItem;
-          bomAssembly.date = currentDate;
-          bomAssembly.timestamp = timestamp;
-
-          bomAssembliesToUpdate.push(bomAssembly);
-        }
-      });
-
-      // Veritabanını güncelle
-      for (const bomAssembly of bomAssembliesToUpdate) {
-        const bomAssemblyRef = doc(db, 'bomAssemblies', bomAssembly.id);
-
-        // Güncellemeden önce mevcut veriyi history koleksiyonuna ekleyelim
-        const bomAssemblySnapshot = await getDoc(bomAssemblyRef);
-        if (bomAssemblySnapshot.exists()) {
-          const existingData = bomAssemblySnapshot.data();
-
-          // Mevcut veriyi history koleksiyonuna ekliyoruz
-          await addDoc(collection(db, 'bomAssembliesHistory'), {
-            ...existingData,
-            bomAssemblyId: bomAssembly.id,
-            timestamp: existingData.timestamp || Date.now(),
-            userId: auth.currentUser!.uid,
-          });
-        }
-
-        // BOM Assembly'yi güncelliyoruz
-        await updateDoc(bomAssemblyRef, bomAssembly);
-      }
-
-      // Yerel state'i güncelle
-      setBOMAssemblies((prevBOMAssemblies) =>
-        prevBOMAssemblies.map((bomAssembly) => {
-          const updatedBOMAssembly = bomAssembliesToUpdate.find((ba) => ba.id === bomAssembly.id);
-          if (updatedBOMAssembly) {
-            return { ...bomAssembly, ...updatedBOMAssembly };
-          }
-          return bomAssembly;
-        })
-      );
-    } catch (error) {
-      console.error('Error updating BOM Assemblies: ', error);
-    }
-  };
-
-  const calculateTotals = (
-    assemblyItems: BOMAssemblyItem[] = newBOMAssembly.assemblyItems.map((item) => ({
-      ...item,
-      quantity: Number(item.quantity),
-    })),
-    salesPrice: number = parseFloat(newBOMAssembly.salesPrice) || 0
-  ) => {
-    const totalCost = assemblyItems.reduce((sum, item) => sum + item.totalCost, 0);
-    const profitPerItem = salesPrice - totalCost;
-    const profitPercentagePerItem = salesPrice > 0 ? (profitPerItem / salesPrice) * 100 : 0;
-
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
     setNewBOMAssembly((prev) => ({
       ...prev,
-      totalCost,
-      profitPerItem,
-      profitPercentagePerItem,
+      [name]: value,
     }));
   };
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, value } = e.target;
-    setNewBOMAssembly((prev) => {
-      const updatedBOMAssembly = {
-        ...prev,
-        [name]: value,
-      };
-
-      if (name === 'salesPrice') {
-        const salesPriceValue = parseFloat(value) || 0;
-        calculateTotals(
-          updatedBOMAssembly.assemblyItems.map((item) => ({
-            ...item,
-            quantity: Number(item.quantity),
-          })),
-          salesPriceValue
-        );
-      }
-
-      return updatedBOMAssembly;
-    });
-  };
-
-  const handleAssemblyItemChange = (
-    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
-  ) => {
+  const handleAssemblyItemChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
     if (name === 'name') {
       let selectedItem;
@@ -489,15 +262,11 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
         unitOfMeasure: '',
         purchaseCost: 0,
       }));
-    } else if (name === 'quantity') {
-      const quantityValue = parseFloat(value) || 0;
-      const totalCost = quantityValue * newAssemblyItem.purchaseCost;
+    } else {
       setNewAssemblyItem((prev) => ({
         ...prev,
-        quantity: value,
-        totalCost: totalCost,
+        [name]: value,
       }));
-      calculateTotals();
     }
   };
 
@@ -506,16 +275,9 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
     const purchaseCost = newAssemblyItem.purchaseCost;
     const totalCost = quantity * purchaseCost;
 
-    const updatedItem: BOMAssemblyItem = {
-      name: newAssemblyItem.name,
-      itemType: newAssemblyItem.itemType,
-      quantity: quantity,
-      unitOfMeasure: newAssemblyItem.unitOfMeasure,
-      purchaseCost: purchaseCost,
-      totalCost: totalCost,
-    };
+    const updatedItem = { ...newAssemblyItem, totalCost, quantity };
 
-    let updatedAssemblyItems: BOMAssemblyItem[];
+    let updatedAssemblyItems;
 
     if (editingItemIndex !== null) {
       // Mevcut ürünü güncelle
@@ -566,6 +328,21 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
     calculateTotals(updatedAssemblyItems);
   };
 
+  const calculateTotals = (assemblyItems = newBOMAssembly.assemblyItems) => {
+    const totalCost = assemblyItems.reduce((sum, item) => sum + item.totalCost, 0);
+    const salesPrice = parseFloat(newBOMAssembly.salesPrice) || 0;
+
+    const profitPerItem = salesPrice - totalCost;
+    const profitPercentagePerItem = salesPrice > 0 ? (profitPerItem / salesPrice) * 100 : 0;
+
+    setNewBOMAssembly((prev) => ({
+      ...prev,
+      totalCost,
+      profitPerItem,
+      profitPercentagePerItem,
+    }));
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!auth.currentUser) return;
@@ -574,11 +351,12 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
       calculateTotals();
 
       const salesPrice = parseFloat(newBOMAssembly.salesPrice) || 0;
+      const currentDate = new Date().toISOString().split('T')[0]; // "YYYY-MM-DD" formatında
 
       const bomData: Omit<BOMAssembly, 'id'> = {
         finishedProductName: newBOMAssembly.finishedProductName,
         articleNumber: newBOMAssembly.articleNumber,
-        date: dayjs().format('DD.MM.YYYY HH:mm:ss'),
+        date: currentDate, // Güncellenen tarihi yansıtma
         salesDescription: newBOMAssembly.salesDescription,
         salesPrice,
         totalCost: newBOMAssembly.totalCost,
@@ -586,49 +364,19 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
         profitPercentagePerItem: newBOMAssembly.profitPercentagePerItem,
         assemblyItems: newBOMAssembly.assemblyItems.map((item) => ({
           ...item,
-          quantity: Number(item.quantity), // Number olarak ayarlıyoruz
+          quantity: parseFloat(item.quantity.toString()) || 0,
         })),
-        timestamp: Date.now(),
+        userId: auth.currentUser.uid,
       };
 
       if (editingBOMAssembly) {
         const bomAssemblyRef = doc(db, 'bomAssemblies', editingBOMAssembly);
-
-        // Güncellemeden önce mevcut veriyi alıyoruz
-        const bomAssemblySnapshot = await getDoc(bomAssemblyRef);
-        if (bomAssemblySnapshot.exists()) {
-          const existingData = bomAssemblySnapshot.data();
-
-          // Mevcut veriyi history koleksiyonuna ekliyoruz
-          await addDoc(collection(db, 'bomAssembliesHistory'), {
-            ...existingData,
-            bomAssemblyId: editingBOMAssembly,
-            timestamp: existingData.timestamp || Date.now(),
-            userId: auth.currentUser.uid,
-          });
-        }
-
-        // Güncelleme işlemi
-        await updateDoc(bomAssemblyRef, {
-          ...bomData,
-          userId: auth.currentUser.uid,
-        });
+        await updateDoc(bomAssemblyRef, bomData);
       } else {
-        // Yeni BOM Assembly ekleme işlemi
-        const newDocRef = await addDoc(collection(db, 'bomAssemblies'), {
-          ...bomData,
-          userId: auth.currentUser.uid,
-        });
-
-        // İlk versiyonu history koleksiyonuna ekliyoruz
-        await addDoc(collection(db, 'bomAssembliesHistory'), {
-          ...bomData,
-          bomAssemblyId: newDocRef.id,
-          userId: auth.currentUser.uid,
-        });
+        await addDoc(collection(db, 'bomAssemblies'), bomData);
       }
 
-      // State ve localStorage'ı sıfırlıyoruz
+      // BOM başarıyla kaydedildikten sonra state'i sıfırlayın ve localStorage'ı temizleyin
       setNewBOMAssembly(initialBOMAssembly);
       localStorage.removeItem('newBOMAssembly');
       setEditingBOMAssembly(null);
@@ -776,37 +524,52 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
     return filters[key];
   };
 
-  const isRecentChange = (id: string) => {
-    const change = bomChanges[id];
-    if (change && change.timestamp) {
-      const oneDay = 24 * 60 * 60 * 1000;
-      return Date.now() - change.timestamp < oneDay;
-    }
-    return false;
+  // Modal ile satış fiyatını güncelleme işlevleri
+  const openPriceModal = (bomId: string, currentPrice: number) => {
+    setCurrentUpdateBOMId(bomId);
+    setPriceToUpdate(currentPrice);
+    setShowPriceModal(true);
   };
 
-  const ChangeArrow = ({
-    id,
-    type,
-  }: {
-    id: string;
-    type: 'salesPriceChange' | 'profitChange' | 'totalCostChange';
-  }) => {
-    const change = bomChanges[id];
-    if (change && isRecentChange(id) && change[type]) {
-      const isIncrease = change[type] === 'increase';
-      const ArrowIcon = isIncrease ? ArrowUp : ArrowDown;
-      const colorClass =
-        type === 'salesPriceChange'
-          ? isIncrease
-            ? 'text-green-500'
-            : 'text-red-500'
-          : isIncrease
-          ? 'text-red-500'
-          : 'text-green-500';
-      return <ArrowIcon className={`inline ml-1 ${colorClass}`} size={16} />;
+  const closePriceModal = () => {
+    setShowPriceModal(false);
+    setCurrentUpdateBOMId(null);
+    setPriceToUpdate(0);
+  };
+
+  const handlePriceUpdate = async () => {
+    if (!currentUpdateBOMId) return;
+
+    try {
+      const bomDocRef = doc(db, 'bomAssemblies', currentUpdateBOMId);
+      const bomDoc = await getDocs(query(bomDocRef));
+
+      if (bomDoc.empty) {
+        setError('BOM Assembly not found.');
+        return;
+      }
+
+      const bomData = bomDoc.docs[0].data() as BOMAssembly;
+
+      const newSalesPrice = parseFloat(priceToUpdate.toFixed(2));
+      const newProfitPerItem = newSalesPrice - bomData.totalCost;
+      const newProfitPercentagePerItem = newSalesPrice > 0 ? (newProfitPerItem / newSalesPrice) * 100 : 0;
+      const currentDate = new Date().toISOString().split('T')[0]; // "YYYY-MM-DD" formatında
+
+      await updateDoc(bomDocRef, {
+        salesPrice: newSalesPrice,
+        profitPerItem: parseFloat(newProfitPerItem.toFixed(2)),
+        profitPercentagePerItem: parseFloat(newProfitPercentagePerItem.toFixed(2)),
+        date: currentDate, // Satış fiyatı güncellendiğinde tarihi de güncelle
+      });
+
+      // Firestore güncellemesi, Cloud Function tarafından tetiklenecek ve costHistory'ye kaydedilecek
+
+      closePriceModal();
+    } catch (error) {
+      console.error('Error updating sales price: ', error);
+      setError('Failed to update sales price. Please try again.');
     }
-    return null;
   };
 
   return (
@@ -816,11 +579,12 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
           <p className="text-red-500">Please log in to view and manage BOM assemblies.</p>
         ) : (
           <>
+            {/* BOM Assembly Form */}
             <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
               <div className="grid grid-cols-2 gap-8">
                 <div className="bg-blue-100 p-4 rounded-lg">
                   <h2 className="text-xl font-semibold mb-4">BOM Details</h2>
-                  <form onSubmit={handleSubmit}>
+                  <form onSubmit={handleSubmit} className="space-y-4">
                     <div className="grid grid-cols-2 gap-4">
                       <div>
                         <label
@@ -863,7 +627,7 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
                           Date
                         </label>
                         <input
-                          type="text"
+                          type="date"
                           id="date"
                           name="date"
                           value={newBOMAssembly.date}
@@ -977,14 +741,13 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
                       </div>
                     </div>
                     <button
-                      onClick={handleSubmit}
-                      className="mt-4 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                      type="submit"
+                      className="bg-blue-500 text-white px-6 py-2 rounded hover:bg-blue-600 text-sm font-medium"
                     >
                       {editingBOMAssembly ? 'Update BOM' : 'Add New BOM'}
                     </button>
                   </form>
                 </div>
-
                 <div className="bg-green-100 p-4 rounded-lg">
                   <h2 className="text-xl font-semibold mb-4">Add Assembly Items</h2>
                   <div className="space-y-4">
@@ -999,21 +762,7 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
                         id="itemType"
                         name="itemType"
                         value={selectedItemType}
-                        onChange={(e) => {
-                          setSelectedItemType(
-                            e.target.value as 'Raw Goods' | 'Other Costs' | 'Finished Product'
-                          );
-                          setNewAssemblyItem((prev) => ({
-                            ...prev,
-                            itemType: e.target.value as
-                              | 'Raw Goods'
-                              | 'Other Costs'
-                              | 'Finished Product',
-                            name: '',
-                            unitOfMeasure: '',
-                            purchaseCost: 0,
-                          }));
-                        }}
+                        onChange={handleAssemblyItemChange}
                         className="w-full p-2 border rounded text-sm"
                       >
                         <option value="Raw Goods">Raw Goods</option>
@@ -1111,7 +860,8 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
                 </div>
               </div>
 
-              <div className="bg-white rounded-lg shadow-lg p-6 mb-4">
+              {/* Assembly Items Table */}
+              <div className="mt-8">
                 <h3 className="text-lg font-semibold mb-2">BOM Assembly Items</h3>
                 <table className="min-w-full bg-white">
                   <thead className="bg-gray-100">
@@ -1170,118 +920,123 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
                   </tfoot>
                 </table>
               </div>
+            </div>
 
-              <div className="bg-white rounded-lg shadow-lg p-6 mb-4">
-                <h2 className="text-2xl font-semibold mb-4">Finished Product List</h2>
-                {loading ? (
-                  <p>Loading finished products...</p>
-                ) : error ? (
-                  <p className="text-red-500">{error}</p>
-                ) : bomAssemblies.length === 0 ? (
-                  <p>No finished products found. Create your first BOM assembly above.</p>
-                ) : (
-                  <>
-                    <table className="min-w-full bg-white">
-                      <thead className="bg-gray-100">
-                        <tr>
-                          <th className="py-2 px-4 border-b text-center">ID</th>
-                          {[
-                            { key: 'finishedProductName', label: 'Finished Product' },
-                            { key: 'articleNumber', label: 'Article Number' },
-                            { key: 'date', label: 'Date' },
-                            { key: 'salesDescription', label: 'Sales Description' },
-                            { key: 'salesPrice', label: 'Sales Price' },
-                            { key: 'totalCost', label: 'Total Cost' },
-                            { key: 'profitPercentagePerItem', label: 'Profit %' },
-                          ].map((column) => (
-                            <th
-                              key={column.key}
-                              className="py-2 px-4 border-b text-center relative"
-                            >
-                              <div className="flex items-center justify-center">
-                                {column.label}
-                                <button
-                                  onClick={() => toggleFilterPopup(column.key)}
-                                  className={`ml-2 hover:text-gray-800 ${
-                                    isFilterActive(column.key) ? 'text-red-500' : 'text-gray-600'
-                                  }`}
-                                >
-                                  <Filter size={16} />
-                                </button>
+            {/* Finished Product List */}
+            <div className="bg-white rounded-lg shadow-lg p-6 mb-4">
+              <h2 className="text-2xl font-semibold mb-4">Finished Product List</h2>
+              {loading ? (
+                <p>Loading finished products...</p>
+              ) : error ? (
+                <p className="text-red-500">{error}</p>
+              ) : bomAssemblies.length === 0 ? (
+                <p>No finished products found. Create your first BOM assembly above.</p>
+              ) : (
+                <>
+                  <table className="min-w-full bg-white">
+                    <thead className="bg-gray-100">
+                      <tr>
+                        <th className="py-2 px-4 border-b text-center">#</th>
+                        {[
+                          { key: 'finishedProductName', label: 'Finished Product' },
+                          { key: 'articleNumber', label: 'Article Number' },
+                          { key: 'date', label: 'Date' },
+                          { key: 'salesDescription', label: 'Sales Description' },
+                          { key: 'salesPrice', label: 'Sales Price' },
+                          { key: 'totalCost', label: 'Total Cost' },
+                          { key: 'profitPercentagePerItem', label: 'Profit %' },
+                        ].map((column) => (
+                          <th
+                            key={column.key}
+                            className="py-2 px-4 border-b text-center relative"
+                          >
+                            <div className="flex items-center justify-center">
+                              {column.label}
+                              <button
+                                onClick={() => toggleFilterPopup(column.key)}
+                                className={`ml-2 hover:text-gray-800 ${
+                                  isFilterActive(column.key) ? 'text-red-500' : 'text-gray-600'
+                                }`}
+                              >
+                                <Filter size={16} />
+                              </button>
+                            </div>
+                            {filterPopupVisible[column.key] && (
+                              <div className="absolute bg-white border rounded shadow p-2 mt-2 z-10">
+                                {['salesPrice', 'totalCost', 'profitPercentagePerItem'].includes(
+                                  column.key
+                                ) ? (
+                                  <div>
+                                    <button
+                                      onClick={() => applySorting(column.key, 'ascending')}
+                                      className="block w-full text-left px-2 py-1 text-sm hover:bg-gray-100"
+                                    >
+                                      Sort Ascending
+                                    </button>
+                                    <button
+                                      onClick={() => applySorting(column.key, 'descending')}
+                                      className="block w-full text-left px-2 py-1 text-sm hover:bg-gray-100"
+                                    >
+                                      Sort Descending
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div>
+                                    {getUniqueValues(column.key).map((value, idx) => (
+                                      <div key={idx} className="flex items-center mb-1">
+                                        <input
+                                          type="checkbox"
+                                          checked={filters[column.key] === value}
+                                          onChange={() => handleFilterChange(column.key, value)}
+                                          className="mr-2"
+                                        />
+                                        <label className="text-sm">{value}</label>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
-                              {filterPopupVisible[column.key] && (
-                                <div className="absolute bg-white border rounded shadow p-2 mt-2 z-10">
-                                  {['salesPrice', 'totalCost', 'profitPercentagePerItem'].includes(
-                                    column.key
-                                  ) ? (
-                                    <div>
-                                      <button
-                                        onClick={() => applySorting(column.key, 'ascending')}
-                                        className="block w-full text-left px-2 py-1 text-sm hover:bg-gray-100"
-                                      >
-                                        Sort Ascending
-                                      </button>
-                                      <button
-                                        onClick={() => applySorting(column.key, 'descending')}
-                                        className="block w-full text-left px-2 py-1 text-sm hover:bg-gray-100"
-                                      >
-                                        Sort Descending
-                                      </button>
-                                    </div>
-                                  ) : (
-                                    <div>
-                                      {getUniqueValues(column.key).map((value, idx) => (
-                                        <div key={idx} className="flex items-center mb-1">
-                                          <input
-                                            type="checkbox"
-                                            checked={filters[column.key] === value}
-                                            onChange={() => handleFilterChange(column.key, value)}
-                                            className="mr-2"
-                                          />
-                                          <label className="text-sm">{value}</label>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                            </th>
-                          ))}
-                          <th className="py-2 px-4 border-b text-center">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {filteredAssemblies.map((assembly, index) => (
+                            )}
+                          </th>
+                        ))}
+                        <th className="py-2 px-4 border-b text-center">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredAssemblies.map((assembly, index) => {
+                        const isUpdatedToday = assembly.date === new Date().toISOString().split('T')[0];
+                        return (
                           <tr
                             key={assembly.id}
-                            className={`hover:bg-gray-50 cursor-pointer ${
-                              isRecentChange(assembly.id) ? 'bg-red-100' : ''
+                            className={`hover:bg-gray-50 ${
+                              isUpdatedToday ? 'bg-red-100' : ''
                             }`}
-                            onClick={() => handleSelectBOMAssembly(assembly)}
                           >
-                            <td className="py-2 px-4 border-b text-center">{index + 1}</td>
-                            <td className="py-2 px-4 border-b text-center">
-                              {assembly.finishedProductName}
-                            </td>
-                            <td className="py-2 px-4 border-b text-center">
-                              {assembly.articleNumber}
-                            </td>
+                            {isUpdatedToday && (
+                              <td className="py-2 px-4 border-b text-center">
+                                <Info
+                                  size={18}
+                                  className="text-blue-500 cursor-pointer"
+                                  onClick={() => openPriceModal(assembly.id, assembly.salesPrice)}
+                                  title="Update Price"
+                                />
+                              </td>
+                            )}
+                            {!isUpdatedToday && (
+                              <td className="py-2 px-4 border-b text-center">#</td>
+                            )}
+                            <td className="py-2 px-4 border-b text-center">{assembly.finishedProductName}</td>
+                            <td className="py-2 px-4 border-b text-center">{assembly.articleNumber}</td>
                             <td className="py-2 px-4 border-b text-center">{assembly.date}</td>
-                            <td className="py-2 px-4 border-b text-center">
-                              {assembly.salesDescription}
-                              <ChangeArrow id={assembly.id} type="salesPriceChange" />
-                            </td>
+                            <td className="py-2 px-4 border-b text-center">{assembly.salesDescription}</td>
                             <td className="py-2 px-4 border-b text-center">
                               €{(assembly.salesPrice || 0).toFixed(2)}
-                              <ChangeArrow id={assembly.id} type="salesPriceChange" />
                             </td>
                             <td className="py-2 px-4 border-b text-center">
                               €{(assembly.totalCost || 0).toFixed(2)}
-                              <ChangeArrow id={assembly.id} type="totalCostChange" />
                             </td>
                             <td className="py-2 px-4 border-b text-center">
                               {(assembly.profitPercentagePerItem || 0).toFixed(2)}%
-                              <ChangeArrow id={assembly.id} type="profitChange" />
                             </td>
                             <td className="py-2 px-4 border-b text-center">
                               <button
@@ -1304,21 +1059,59 @@ const BOMAssemblies: React.FC<BOMAssembliesProps> = ({ logo, restaurantName }) =
                               </button>
                             </td>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    {bomAssemblies.length > 0 && (
-                      <button
-                        onClick={resetFilters}
-                        className="mt-4 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 flex items-center"
-                      >
-                        Reset Filters
-                      </button>
-                    )}
-                  </>
-                )}
-              </div>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {bomAssemblies.length > 0 && (
+                    <button
+                      onClick={resetFilters}
+                      className="mt-4 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 flex items-center"
+                    >
+                      Reset Filters
+                    </button>
+                  )}
+                </>
+              )}
             </div>
+
+            {/* Price Update Modal */}
+            {showPriceModal && (
+              <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-20">
+                <div className="bg-white rounded-lg shadow-lg p-6 w-96">
+                  <h3 className="text-lg font-semibold mb-4">Update Sales Price</h3>
+                  <div className="mb-4">
+                    <label htmlFor="newSalesPrice" className="block text-sm font-medium text-gray-700 mb-1">
+                      New Sales Price (€)
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      id="newSalesPrice"
+                      name="newSalesPrice"
+                      value={priceToUpdate}
+                      onChange={(e) => setPriceToUpdate(parseFloat(e.target.value))}
+                      className="w-full p-2 border rounded text-sm"
+                      required
+                    />
+                  </div>
+                  <div className="flex justify-end space-x-4">
+                    <button
+                      onClick={closePriceModal}
+                      className="px-4 py-2 bg-gray-300 text-gray-700 rounded hover:bg-gray-400"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handlePriceUpdate}
+                      className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                    >
+                      Update
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>

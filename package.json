@@ -26,10 +26,17 @@
     "vite": "^3.0.4"
   },
   "dependencies": {
+    "dayjs": "^1.11.13",
     "firebase": "^10.12.5",
     "jspdf": "^2.5.1",
     "jspdf-autotable": "^3.8.2",
     "lucide-react": "^0.427.0",
-    "react-router-dom": "^6.26.0"
+    "react-data-table-component-extensions": "^1.6.0",
+    "react-datepicker": "^7.3.0",
+    "react-feather": "^2.0.10",
+    "react-router-dom": "^6.26.0",
+    "react-select": "^5.8.0",
+    "react-spinners": "^0.14.1",
+    "recharts": "^2.12.7"
   }
 }

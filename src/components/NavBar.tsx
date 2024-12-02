@@ -4,13 +4,14 @@ import { Home } from 'lucide-react';
 
 interface NavBarProps {
   logo: string;
+  restaurantName: string; // Yeni eklenen özellik
 }
 
-const NavBar: React.FC<NavBarProps> = ({ logo }) => {
+const NavBar: React.FC<NavBarProps> = ({ logo, restaurantName }) => {
   const location = useLocation();
 
   const getPageName = () => {
-    switch(location.pathname) {
+    switch (location.pathname) {
       case '/':
         return 'Navigation Hub';
       case '/staff-resources':
@@ -23,16 +24,20 @@ const NavBar: React.FC<NavBarProps> = ({ logo }) => {
         return 'Raw Goods';
       case '/bom-assemblies':
         return 'BOM Assemblies';
-      case '/finished-goods':
-        return 'Finished Goods';
-      case '/work-orders':
-        return 'Work Orders';
+      case '/stock-count':
+        return 'Stock Count';
+      case '/suppliers':
+        return 'Suppliers';
       case '/sales-orders':
         return 'Sales Orders';
       case '/dashboard':
         return 'Dashboard';
+      case '/raw-goods-list':
+        return 'Raw Goods List';
+      case '/finished-products-list':
+        return 'Finished Products List';
       default:
-        return 'Restaurant Manager';
+        return restaurantName; // 'restaurantName' prop'unu kullanıyoruz
     }
   };
 
@@ -46,7 +51,7 @@ const NavBar: React.FC<NavBarProps> = ({ logo }) => {
             <span className="text-5xl">🐝</span>
           )}
         </div>
-        <h1 className="text-3xl font-bold flex-2 text-center">{getPageName()}</h1>
+        <h1 className="text-3xl font-bold text-center flex-1">{getPageName()}</h1> {/* 'flex-2' yerine 'flex-1' kullanıldı */}
         <div className="flex items-center justify-end flex-1">
           <Link to="/" className="bg-blue-500 hover:bg-blue-400 p-3 rounded-full transition-colors">
             <Home size={32} />
